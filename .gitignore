@@ -1,0 +1,4 @@
+# local environment, DS_Store
+env/*
+.DS_Store
+
