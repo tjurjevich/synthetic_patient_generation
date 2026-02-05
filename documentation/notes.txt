@@ -1,0 +1,14 @@
+Elements for synthetic dataset:
+
+patientid
+age
+race
+ethnicity (root categories: white, asian, black or african american, american indian or alaska native, other)
+height_cm (normal; male = ?, female = ?)
+weight_kg (right skewed); 
+systolic_bp (normal, slightly right skewed; 110-130)
+diastolic_bp (normal; 70-85)
+heart_rate (normal, slightly right skewed; 60-90)
+has_diabetes
+has_hypertension
+has_cancer
