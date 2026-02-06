@@ -1,1 +1,0 @@
-# This script will create the "original" data, although still synthetic in nature.
