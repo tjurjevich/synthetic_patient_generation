@@ -3,11 +3,29 @@ import polars as pl
 import uuid
 import numpy as np
 
+def generate_data(num_patients: int = 100, random_seed: int|None = None, include_patient_id: bool = False) -> pl.DataFrame:
+    """
+    Generates a synthetic dataset using predefined distributions. The following elements are synthetically generated: patient age, patient sex, patient race,
+    height, weight, diastolic blood pressure, systolic blood pressure, and heart rate.
 
-def generate_data(num_patients, random_seed):
+    Parameters:
+
+        num_patients (int): Number of synthetic patients (rows) to be generated.
+
+        random_seed (int): Seed value for reproducibility. 
+
+        include_patient_id (bool): True if a unique UUID4 patient identifier is desired in final output, otherwise False.
+
+    Returns:
+
+        polars.DataFrame object
+    """
     np.random.seed(random_seed)
     data = []
     for _ in range(num_patients):
+        # set patient id, which can later be excluded from output if include_patient_id = False
+        pid = uuid.uuid4()
+
         # set age 
         age = np.random.randint(18, 90, size = 1)
 
@@ -48,12 +66,13 @@ def generate_data(num_patients, random_seed):
         diastolic_bp = np.clip(diastolic_bp, 50, 120)
         heart_rate = np.clip(heart_rate, 40, 140)
 
-        row = [int(age[0]), str(sex[0]), str(race[0]), int(height), int(weight), int(systolic_bp[0]), int(diastolic_bp[0]), int(heart_rate[0])]
+        row = [str(pid), int(age[0]), str(sex[0]), str(race[0]), int(height), int(weight), int(systolic_bp[0]), int(diastolic_bp[0]), int(heart_rate[0])]
         data.append(row)
     df = pl.DataFrame(
         data, 
         orient='row',
         schema = {
+            "patient_id":pl.Utf8,
             "patient_age":pl.Int32, 
             "patient_gender":pl.Utf8, 
             "patient_race":pl.Utf8, 
@@ -64,6 +83,7 @@ def generate_data(num_patients, random_seed):
             "patient_heart_rate":pl.Int32
         }
     )
+    # replace Unknowns with Nones, and randomly replace 5% of diastolic bp, systolic bp, and heart rate with None
     df = df.with_columns(
         pl.when(pl.col("patient_gender") == "Unknown").then(None).otherwise(pl.col("patient_gender")).alias("patient_gender"),
         pl.when(pl.col("patient_race") == "Unknown").then(None).otherwise(pl.col("patient_race")).alias("patient_race"),
@@ -72,4 +92,11 @@ def generate_data(num_patients, random_seed):
         pl.when(pl.lit(np.random.rand(df.height)) < 0.05).then(None).otherwise(pl.col("patient_heart_rate")).alias("patient_heart_rate")
     )
 
-    return df
+    if not include_patient_id:
+        return df.drop("patient_id")
+    else:
+        return df
+    
+if __name__ == "__main__":
+    data = generate_data(num_patients=100000, random_seed=42, include_patient_id=True)
+    data.write_parquet('data/original_data.parquet')
