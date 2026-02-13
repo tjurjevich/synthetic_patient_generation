@@ -58,16 +58,58 @@ class PatientDecoder(Layer):
 
 # Combined (VAE) framework
 class PatientGenerator(tf.keras.Model):
-    def __init__(self, encoder, decoder):
+    def __init__(self, encoder, decoder, num_continous_variables):
         super().__init__()
         self.encoder = encoder 
         self.decoder = decoder 
+        self.num_continuous_variables = num_continous_variables
     
+        self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
+        self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="recon_loss")
+        self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
+
+    @property 
+    def metrics(self):
+        return [self.total_loss_tracker, self.reconstruction_loss_tracker, self.kl_loss_tracker]
+
     def call(self, inputs):
         mean, log_var, z = self.encoder(inputs)
         reconstructed_ouput = self.decoder(z)
+        return reconstructed_ouput
+    
+    def train_step(self, data):
+        if isinstance(data, tuple):
+            data = data[0]
+        with tf.GradientTape() as tape:
+            # 1. Encoder = forward pass
+            mean, log_var, z = self.encoder(data)
+            # 2. Decoder = forward pass
+            reconstructed_output = self.decoder(z)
 
-        kl_loss = -0.5 * tf.reduce_mean(
-            log_var - tf.square(mean) - tf.exp(log_var) + 1
-        )
-        self.add_loss(kl_loss)
+            # 3. Split reconstruction into continuous and categorical parts
+            recon_cont = tf.reduce_mean(
+                tf.reduce_sum(tf.square(data[:, :self.num_cont] - reconstructed_output[:, :self.num_cont]), axis=1)
+            )
+            recon_cat = tf.reduce_mean(
+                tf.keras.losses.categorical_crossentropy(
+                    data[:, self.num_cont:], 
+                    reconstructed_output[:, self.num_cont:], 
+                    from_logits=True
+                )
+            )
+            # 4. KL divergence loss
+            kl_loss = -0.5 * (1 + log_var - tf.square(mean) - tf.exp(log_var))
+            kl_loss = tf.reduce_sum(tf.reduce_sum(kl_loss, axis = 1))
+
+            # 5. Add reconstruction losses with KL divergence loss for overall loss
+            total_loss = recon_cat + recon_cont + kl_loss
+            
+            # 6. Calculate gradients and apply to current set of model weights
+            grads = tape.gradient(total_loss, self.trainable_weights)
+            self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+
+            # 7. Update metrics
+            self.reconstruction_loss_tracker.update_state(recon_cat + recon_cont)
+            self.kl_loss_tracker.update_state(kl_loss)
+            self.total_loss_tracker.update_state(total_loss)
+            return {m.name: m.result() for m in self.metrics}
