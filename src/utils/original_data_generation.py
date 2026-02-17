@@ -83,14 +83,6 @@ def generate_data(num_patients: int = 100, random_seed: int|None = None, include
             "patient_heart_rate":pl.Int32
         }
     )
-    # replace Unknowns with Nones, and randomly replace 5% of diastolic bp, systolic bp, and heart rate with None
-    df = df.with_columns(
-        pl.when(pl.col("patient_gender") == "Unknown").then(None).otherwise(pl.col("patient_gender")).alias("patient_gender"),
-        pl.when(pl.col("patient_race") == "Unknown").then(None).otherwise(pl.col("patient_race")).alias("patient_race"),
-        pl.when(pl.lit(np.random.rand(df.height)) < 0.05).then(None).otherwise(pl.col("patient_diastolic_bp")).alias("patient_diastolic_bp"),
-        pl.when(pl.lit(np.random.rand(df.height)) < 0.05).then(None).otherwise(pl.col("patient_systolic_bp")).alias("patient_systolic_bp"),
-        pl.when(pl.lit(np.random.rand(df.height)) < 0.05).then(None).otherwise(pl.col("patient_heart_rate")).alias("patient_heart_rate")
-    )
 
     if not include_patient_id:
         return df.drop("patient_id")
