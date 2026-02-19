@@ -5,6 +5,7 @@ import polars as pl
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
+import numpy as np
 
 # Define numeric & categorical variables
 NUM_VARS = ["patient_age","patient_height_cm","patient_weight_kg","patient_systolic_bp","patient_diastolic_bp","patient_heart_rate"]
@@ -164,12 +165,14 @@ class DataPreprocessor():
     def inverse_transform(self, raw_data):
         return self.preprocessor.inverse_transform(raw_data)
 
-def process_categorical_model_output(preprocessor: DataPreprocessor, raw_data, numeric_dimensions, categorical_feature_names):
+def process_categorical_model_output(preprocessor: DataPreprocessor, raw_output, numeric_dimensions, categorical_feature_names):
     # Determine the cardinality of each categorical field, which will be needed for splitting the data.
     field_cardinalities = []
     for name in categorical_feature_names:
         total = [val for val in preprocessor.preprocessor.get_feature_names_out() if val.startswith(f"categorical__{name}")]
         field_cardinalities.append(len(total))
+    results = np.empty(shape = (raw_output.shape[0], sum(field_cardinalities)))
+
     
     
 
