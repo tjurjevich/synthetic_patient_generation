@@ -164,6 +164,15 @@ class DataPreprocessor():
     def inverse_transform(self, raw_data):
         return self.preprocessor.inverse_transform(raw_data)
 
+def process_categorical_model_output(preprocessor: DataPreprocessor, raw_data, numeric_dimensions, categorical_feature_names):
+    # Determine the cardinality of each categorical field, which will be needed for splitting the data.
+    field_cardinalities = []
+    for name in categorical_feature_names:
+        total = [val for val in preprocessor.preprocessor.get_feature_names_out() if val.startswith(f"categorical__{name}")]
+        field_cardinalities.append(len(total))
+    
+    
+
 if __name__ == "__main__":
     data = pl.read_parquet("./data/original_data.parquet")
     dp = DataPreprocessor(data = data)
@@ -195,5 +204,9 @@ if __name__ == "__main__":
 
     # Decode to original input dimensions
     unprocessed_output = vae.decoder(z_new)
-    # print(dp.preprocessor.named_transformers_["numeric"].inverse_transform(unprocessed_output.numpy()[:, :6]))
+
+    processed_numeric_output = dp.preprocessor.named_transformers_["numeric"].inverse_transform(unprocessed_output.numpy()[:, :len(NUM_VARS)])
+    print(unprocessed_output.numpy()[:, len(NUM_VARS):len(NUM_VARS)+4])
+    print(unprocessed_output.numpy()[:, len(NUM_VARS)+4:])
+
 
