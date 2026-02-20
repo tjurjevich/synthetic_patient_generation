@@ -15,7 +15,7 @@ CAT_VARS = ["patient_gender","patient_race"]
 ENCODER_EDGE_DIM = 256
 DECODER_EDGE_DIM = 128
 LATENT_DIM = 32
-BETA = 8
+BETA = 4
 FREE_BITS = 2.0
 
 # Encoder framework
@@ -117,7 +117,8 @@ class PatientDataGenerator(tf.keras.Model):
                 tf.keras.losses.categorical_crossentropy(
                     data[:, self.num_continuous_variables:], 
                     reconstructed_output[:, self.num_continuous_variables:], 
-                    from_logits=True
+                    from_logits=True,
+                    label_smoothing=0.1
                 )
             )
             # 4. KL divergence loss
@@ -165,16 +166,18 @@ class DataPreprocessor():
     def inverse_transform(self, raw_data):
         return self.preprocessor.inverse_transform(raw_data)
 
-def process_categorical_model_output(preprocessor: DataPreprocessor, raw_output, numeric_dimensions, categorical_feature_names):
-    # Determine the cardinality of each categorical field, which will be needed for splitting the data.
-    field_cardinalities = []
-    for name in categorical_feature_names:
-        total = [val for val in preprocessor.preprocessor.get_feature_names_out() if val.startswith(f"categorical__{name}")]
-        field_cardinalities.append(len(total))
-    results = np.empty(shape = (raw_output.shape[0], sum(field_cardinalities)))
+def process_categorical_model_output(preprocessor: DataPreprocessor, raw_output: np.array, categorical_feature_names):
+    cleaned_arrays = []
+    for field in categorical_feature_names:
+        slice_indices = [i for i,j in enumerate(preprocessor.preprocessor.get_feature_names_out()) if field in j]
+        sliced_data = raw_output[:, min(slice_indices):max(slice_indices)+1]
+        cat_field_array = np.zeros_like(sliced_data)
+        cat_field_array[np.arange(len(sliced_data)), np.argmax(sliced_data, axis = 1)] = 1
+        cleaned_arrays.append(cat_field_array)
+    cleaned_arrays = tuple(cleaned_arrays)
+    binarized_data = np.hstack(cleaned_arrays)
+    return dp.preprocessor.named_transformers_["categorical"].inverse_transform(binarized_data)
 
-    
-    
 
 if __name__ == "__main__":
     data = pl.read_parquet("./data/original_data.parquet")
@@ -198,7 +201,7 @@ if __name__ == "__main__":
     vae.compile(optimizer = "adam")
     vae.fit(
         input_data,
-        epochs = 25,
+        epochs = 50,
         batch_size = 256
     )
 
@@ -209,7 +212,8 @@ if __name__ == "__main__":
     unprocessed_output = vae.decoder(z_new)
 
     processed_numeric_output = dp.preprocessor.named_transformers_["numeric"].inverse_transform(unprocessed_output.numpy()[:, :len(NUM_VARS)])
-    print(unprocessed_output.numpy()[:, len(NUM_VARS):len(NUM_VARS)+4])
-    print(unprocessed_output.numpy()[:, len(NUM_VARS)+4:])
-
-
+    processed_categorical_output = process_categorical_model_output(dp, raw_output=unprocessed_output, categorical_feature_names=CAT_VARS)
+    
+    # print(processed_numeric_output.shape)
+    # print(processed_categorical_output.shape)
+    print(np.hstack((processed_numeric_output, processed_categorical_output)))
