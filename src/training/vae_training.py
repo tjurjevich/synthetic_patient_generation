@@ -5,6 +5,7 @@ import polars as pl
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
+# from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 
 # Define numeric & categorical variables
@@ -12,20 +13,21 @@ NUM_VARS = ["patient_age","patient_height_cm","patient_weight_kg","patient_systo
 CAT_VARS = ["patient_gender","patient_race"]
 
 # Dimensions for inner/outer layers
-ENCODER_EDGE_DIM = 256
-DECODER_EDGE_DIM = 128
-LATENT_DIM = 32
-BETA = 4
+ENCODER_OUTER_DIM = 256
+DECODER_INNER_DIM = 128
+LATENT_DIM = 8
+BETA = 6
 FREE_BITS = 2.0
+EPOCHS = 10
 
 # Encoder framework
 class PatientEncoder(Layer):
-    def __init__(self, edge_dim: int, latent_dim: int):
+    def __init__(self, outer_dim: int, latent_dim: int):
         super().__init__()
         # Layers for deterministic portion
-        self.dense_1 = Dense(units = edge_dim, activation = "relu")
+        self.dense_1 = Dense(units = outer_dim, activation = "relu")
         self.batch_norm_1 = BatchNormalization()
-        self.dense_2 = Dense(units = edge_dim // 2, activation = "relu")
+        self.dense_2 = Dense(units = outer_dim // 2, activation = "relu")
         self.batch_norm_2 = BatchNormalization()
         # Layers for reparameterization
         self.z_mean = Dense(units = latent_dim, name = "z_mean")
@@ -47,46 +49,36 @@ class PatientEncoder(Layer):
         
 # Decoder framework
 class PatientDecoder(Layer):
-    def __init__(self, edge_dim: int, original_continuous_dimensions, num_categories_list):
+    def __init__(self, inner_dim: int, num_numeric_dimensions, categorical_cardinalities):
         """
         original_continuous_dimensions: normalized, but unchanged continous variables: 6 in this particular use-case
         num_categories_list: cardinality for each discrete variable (order of variables/cardinality will matter): [4, 7] in this particular use-case
         """
         super().__init__()
         # Innermost dense layer
-        self.dense_1 = Dense(units = edge_dim, activation = "relu")
+        self.dense_1 = Dense(units = inner_dim, activation = "relu")
         # Outermost dense layer
-        self.dense_2 = Dense(units = edge_dim * 2, activation = "relu")
+        self.dense_2 = Dense(units = inner_dim * 2, activation = "relu")
 
         # Separate continuous from discrete variables
-        self.output_continous = Dense(original_continuous_dimensions)
-        self.output_discrete = [Dense(n, activation = "softmax") for n in num_categories_list]
+        self.output_numeric = Dense(num_numeric_dimensions)
+        self.output_categorical = [Dense(n, activation = "softmax") for n in categorical_cardinalities]
 
     def call(self, inputs):
         x = self.dense_1(inputs)
         x = self.dense_2(x)
-        x_cont = self.output_continous(x)
-        x_discrete = [layer(x) for layer in self.output_discrete]
-        return tf.concat([x_cont] + x_discrete, axis = -1)
-
-# class KLAnnealingCallback(tf.keras.callbacks.Callback):
-#     def __init__(self, warmup_epochs: int):
-#         super().__init__()
-#         self.warmup_epochs = warmup_epochs
-
-#     def on_epoch_begin(self, epoch, logs=None):
-#         new_weight = min(1.0, (epoch + 1) / self.warmup_epochs)
-#         self.model.kl_weight.assign(new_weight)
+        x_num = self.output_numeric(x)
+        x_cat = [layer(x) for layer in self.output_categorical]
+        return tf.concat([x_num] + x_cat, axis = -1)
 
 # Combined (VAE) framework
 class PatientDataGenerator(tf.keras.Model):
-    def __init__(self, encoder, decoder, num_continous_variables):
+    def __init__(self, encoder, decoder, num_numeric_dimensions):
         super().__init__()
         self.encoder = encoder 
         self.decoder = decoder 
-        self.num_continuous_variables = num_continous_variables
-        # self.kl_weight = tf.Variable(0.0, trainable=False, name="kl_weight")
-    
+        self.num_continuous_variables = num_numeric_dimensions
+
         self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
         self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="recon_loss")
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
@@ -110,9 +102,10 @@ class PatientDataGenerator(tf.keras.Model):
             reconstructed_output = self.decoder(z)
 
             # 3. Split reconstruction into continuous and categorical parts
-            recon_cont = tf.reduce_mean(
+            recon_num = tf.reduce_mean(
                 tf.reduce_sum(tf.square(data[:, :self.num_continuous_variables] - reconstructed_output[:, :self.num_continuous_variables]), axis=1)
             )
+
             recon_cat = tf.reduce_mean(
                 tf.keras.losses.categorical_crossentropy(
                     data[:, self.num_continuous_variables:], 
@@ -121,20 +114,21 @@ class PatientDataGenerator(tf.keras.Model):
                     label_smoothing=0.1
                 )
             )
+
             # 4. KL divergence loss
             kl_loss = -0.5 * (1 + log_var - tf.square(mean) - tf.exp(log_var))
-            kl_loss = tf.maximum(kl_loss, FREE_BITS)  # apply free bits per dimension
+            kl_loss = tf.maximum(kl_loss, FREE_BITS)  # caps KL loss to a minimum of FREE_BITS parameter
             kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
 
             # 5. Add reconstruction losses with KL divergence loss for overall loss
-            total_loss = recon_cat + recon_cont + (BETA * kl_loss)
+            total_loss = recon_cat + recon_num + (BETA * kl_loss)
             
             # 6. Calculate gradients and apply to current set of model weights
             grads = tape.gradient(total_loss, self.trainable_weights)
             self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
 
             # 7. Update metrics
-            self.reconstruction_loss_tracker.update_state(recon_cat + recon_cont)
+            self.reconstruction_loss_tracker.update_state(recon_cat + recon_num)
             self.kl_loss_tracker.update_state(kl_loss)
             self.total_loss_tracker.update_state(total_loss)
             return {m.name: m.result() for m in self.metrics}
@@ -184,6 +178,18 @@ if __name__ == "__main__":
     dp = DataPreprocessor(data = data)
     input_data = dp.transform(numeric_feature_names=NUM_VARS, categorical_feature_names=CAT_VARS)
 
+    # class_weights_list = []
+    # ohe = dp.preprocessor.named_transformers_["categorical"].named_steps["one_hot_encoder"]
+    # for i, cat in enumerate(CAT_VARS):
+    #     categories = ohe.categories_[i]
+    #     y = data[cat].to_numpy()
+    #     weights = compute_class_weight("balanced", classes=categories, y=y)
+    #     class_weights_list.append(weights)
+
+    # Concatenate into a single weight vector matching the one-hot encoded columns
+    # cat_class_weights = np.concatenate(class_weights_list).astype(np.float32)
+    # cat_class_weights_tf = tf.constant(cat_class_weights)
+
     # Document field names and possible values, which will need to be used as upcoming parameters for model
     categorical_metadata = {}
     for i,cat in enumerate(CAT_VARS):
@@ -191,17 +197,17 @@ if __name__ == "__main__":
         categorical_metadata[cat] = possible_vals.tolist()
 
     # Initialize encoder & decoder
-    encoder = PatientEncoder(edge_dim=ENCODER_EDGE_DIM, latent_dim=LATENT_DIM)
-    decoder = PatientDecoder(edge_dim=DECODER_EDGE_DIM, original_continuous_dimensions=len(NUM_VARS), num_categories_list=[len(i) for i in categorical_metadata.values()])
+    encoder = PatientEncoder(outer_dim=ENCODER_OUTER_DIM, latent_dim=LATENT_DIM)
+    decoder = PatientDecoder(inner_dim=DECODER_INNER_DIM, num_numeric_dimensions=len(NUM_VARS), categorical_cardinalities=[len(i) for i in categorical_metadata.values()])
     
     # Pass encoder & decoder into PatientDataGenerator object
-    vae = PatientDataGenerator(encoder = encoder, decoder = decoder, num_continous_variables = len(NUM_VARS))
+    vae = PatientDataGenerator(encoder = encoder, decoder = decoder, num_numeric_dimensions = len(NUM_VARS))
 
     # Compile and train
     vae.compile(optimizer = "adam")
     vae.fit(
         input_data,
-        epochs = 50,
+        epochs = EPOCHS,
         batch_size = 256
     )
 
