@@ -12,16 +12,26 @@ import numpy as np
 NUM_VARS = ["patient_age","patient_height_cm","patient_weight_kg","patient_systolic_bp","patient_diastolic_bp","patient_heart_rate"]
 CAT_VARS = ["patient_gender","patient_race"]
 
-# Dimensions for inner/outer layers
+# Dimensions for inner/outer dense layers
 ENCODER_OUTER_DIM = 256
 DECODER_INNER_DIM = 128
-LATENT_DIM = 8
-BETA = 6
-FREE_BITS = 2.0
-EPOCHS = 10
 
-# Encoder framework
+# Additinal model params for fine-tuning resulting breakouts
+LATENT_DIM = 8
+FREE_BITS = 0.5
+MAX_BETA = 2.0
+
+# Training epochs & max-beta warmup period
+EPOCHS = 20
+WARMUP_EPOCH_PCT = 0.4
+
+# Desired number of sythetic output rows
+OUTPUT_LENGTH = 10000
+
 class PatientEncoder(Layer):
+    """ 
+    Responsible for data compression into probabilistic latent space, which is included within the encoder itself.
+    """
     def __init__(self, outer_dim: int, latent_dim: int):
         super().__init__()
         # Layers for deterministic portion
@@ -47,8 +57,10 @@ class PatientEncoder(Layer):
         z = self.reparameterization(mean = mean, log_var = log_var)
         return mean, log_var, z
         
-# Decoder framework
 class PatientDecoder(Layer):
+    """ 
+    Responsible for reconstructing the probabilistic (training or inference) latent variables into the original K-dimensional space.
+    """
     def __init__(self, inner_dim: int, num_numeric_dimensions, categorical_cardinalities):
         """
         original_continuous_dimensions: normalized, but unchanged continous variables: 6 in this particular use-case
@@ -71,14 +83,18 @@ class PatientDecoder(Layer):
         x_cat = [layer(x) for layer in self.output_categorical]
         return tf.concat([x_num] + x_cat, axis = -1)
 
-# Combined (VAE) framework
 class PatientDataGenerator(tf.keras.Model):
-    def __init__(self, encoder, decoder, num_numeric_dimensions):
+    """ 
+    Framework for the VAE. Initialized with the encoder architecture, decoder architecture, and number of numeric dimensions (in 
+    order to split based on variable type, as well as to define specified number of dense layers based on variable type).
+    """
+    def __init__(self, encoder, decoder, num_numeric_dimensions, initial_beta = 0.0):
         super().__init__()
         self.encoder = encoder 
         self.decoder = decoder 
         self.num_continuous_variables = num_numeric_dimensions
-
+        self.beta = tf.Variable(initial_beta, trainable=False, dtype=tf.float32) 
+        
         self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
         self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="recon_loss")
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
@@ -110,18 +126,17 @@ class PatientDataGenerator(tf.keras.Model):
                 tf.keras.losses.categorical_crossentropy(
                     data[:, self.num_continuous_variables:], 
                     reconstructed_output[:, self.num_continuous_variables:], 
-                    from_logits=True,
                     label_smoothing=0.1
                 )
             )
 
-            # 4. KL divergence loss
+            # 4. KL divergence loss (ensures the encoder posterior sticks true to a standard normal prior, which will be used for generating synthetic data)
             kl_loss = -0.5 * (1 + log_var - tf.square(mean) - tf.exp(log_var))
             kl_loss = tf.maximum(kl_loss, FREE_BITS)  # caps KL loss to a minimum of FREE_BITS parameter
             kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
 
             # 5. Add reconstruction losses with KL divergence loss for overall loss
-            total_loss = recon_cat + recon_num + (BETA * kl_loss)
+            total_loss = (recon_cat * 8.0) + (recon_num * 1.0) + (self.beta * kl_loss)
             
             # 6. Calculate gradients and apply to current set of model weights
             grads = tape.gradient(total_loss, self.trainable_weights)
@@ -133,10 +148,30 @@ class PatientDataGenerator(tf.keras.Model):
             self.total_loss_tracker.update_state(total_loss)
             return {m.name: m.result() for m in self.metrics}
 
+class KLAnnealingCallback(tf.keras.callbacks.Callback):
+    """ 
+    Controls how strong KL divergence is influencing training gradually over the first N epochs
+    """
+    def __init__(self, max_beta: float, warmup_epochs: int, total_epochs: int):
+        """
+        max_beta: the ceiling Beta value once annealing completes
+        warmup_epochs: how many epochs to spend ramping up (after this, Beta = max_beta)
+        total_epochs: total training epochs, used only for logging
+        """
+        super().__init__()
+        self.max_beta = max_beta
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
 
+    def on_epoch_begin(self, epoch, logs=None):
+        new_beta = min(self.max_beta, self.max_beta * (epoch / self.warmup_epochs))
+        self.model.beta.assign(new_beta)
 
-# Function which will engineer features from "original" data
 class DataPreprocessor():
+    """ 
+    Class for storing data preprocessing steps in memory. Provides ability to transform, fit, and inverse transform 
+    both numeric and categorical variables.
+    """
     def __init__(self, data: pl.DataFrame):
         self.data_ = data
 
@@ -161,6 +196,9 @@ class DataPreprocessor():
         return self.preprocessor.inverse_transform(raw_data)
 
 def process_categorical_model_output(preprocessor: DataPreprocessor, raw_output: np.array, categorical_feature_names):
+    """ 
+    Slices raw output to only categorical variables, performs a manual "softmax" step to set one-hot encoded values for each variable.
+    """
     cleaned_arrays = []
     for field in categorical_feature_names:
         slice_indices = [i for i,j in enumerate(preprocessor.preprocessor.get_feature_names_out()) if field in j]
@@ -172,23 +210,17 @@ def process_categorical_model_output(preprocessor: DataPreprocessor, raw_output:
     binarized_data = np.hstack(cleaned_arrays)
     return dp.preprocessor.named_transformers_["categorical"].inverse_transform(binarized_data)
 
+def process_numeric_model_output(preprocessor: DataPreprocessor, raw_output: np.array, num_numeric_dimensions: int):
+    """ 
+    Slices raw output to only numeric variables, and rounds to nearest whole integer for each variable.
+    """
+    cleaned_data =  preprocessor.preprocessor.named_transformers_["numeric"].inverse_transform(raw_output.numpy()[:, :num_numeric_dimensions])
+    return np.round(cleaned_data)
 
 if __name__ == "__main__":
     data = pl.read_parquet("./data/original_data.parquet")
     dp = DataPreprocessor(data = data)
     input_data = dp.transform(numeric_feature_names=NUM_VARS, categorical_feature_names=CAT_VARS)
-
-    # class_weights_list = []
-    # ohe = dp.preprocessor.named_transformers_["categorical"].named_steps["one_hot_encoder"]
-    # for i, cat in enumerate(CAT_VARS):
-    #     categories = ohe.categories_[i]
-    #     y = data[cat].to_numpy()
-    #     weights = compute_class_weight("balanced", classes=categories, y=y)
-    #     class_weights_list.append(weights)
-
-    # Concatenate into a single weight vector matching the one-hot encoded columns
-    # cat_class_weights = np.concatenate(class_weights_list).astype(np.float32)
-    # cat_class_weights_tf = tf.constant(cat_class_weights)
 
     # Document field names and possible values, which will need to be used as upcoming parameters for model
     categorical_metadata = {}
@@ -203,23 +235,35 @@ if __name__ == "__main__":
     # Pass encoder & decoder into PatientDataGenerator object
     vae = PatientDataGenerator(encoder = encoder, decoder = decoder, num_numeric_dimensions = len(NUM_VARS))
 
+    
+
     # Compile and train
     vae.compile(optimizer = "adam")
     vae.fit(
         input_data,
         epochs = EPOCHS,
-        batch_size = 256
+        batch_size = 256,
+        callbacks=[
+            KLAnnealingCallback(
+                max_beta=MAX_BETA,
+                warmup_epochs=int(EPOCHS * WARMUP_EPOCH_PCT),
+                total_epochs=EPOCHS
+            )
+        ]
     )
 
     # Sample new points from normal dist (prior)
-    z_new = tf.random.normal(shape = (100, LATENT_DIM))
+    z_new = tf.random.normal(shape = (OUTPUT_LENGTH, LATENT_DIM))
 
     # Decode to original input dimensions
     unprocessed_output = vae.decoder(z_new)
 
-    processed_numeric_output = dp.preprocessor.named_transformers_["numeric"].inverse_transform(unprocessed_output.numpy()[:, :len(NUM_VARS)])
+    # Split and process numeric vs. categorical data separately
+    processed_numeric_output = process_numeric_model_output(dp, raw_output=unprocessed_output, num_numeric_dimensions=len(NUM_VARS)) #dp.preprocessor.named_transformers_["numeric"].inverse_transform(unprocessed_output.numpy()[:, :len(NUM_VARS)])
     processed_categorical_output = process_categorical_model_output(dp, raw_output=unprocessed_output, categorical_feature_names=CAT_VARS)
     
-    # print(processed_numeric_output.shape)
-    # print(processed_categorical_output.shape)
-    print(np.hstack((processed_numeric_output, processed_categorical_output)))
+    # Combine into one array and convert to DataFrame for export
+    numeric_final = pl.DataFrame(processed_numeric_output, schema = [(var,pl.Int32) for var in NUM_VARS])
+    categorical_final = pl.DataFrame(processed_categorical_output, schema = [(val,pl.Utf8) for val in CAT_VARS])
+    processed_df = pl.concat([numeric_final, categorical_final], how = 'horizontal')
+    processed_df.write_parquet('./data/synthetic_data.parquet')
