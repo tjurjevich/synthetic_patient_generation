@@ -262,8 +262,19 @@ if __name__ == "__main__":
     processed_numeric_output = process_numeric_model_output(dp, raw_output=unprocessed_output, num_numeric_dimensions=len(NUM_VARS)) #dp.preprocessor.named_transformers_["numeric"].inverse_transform(unprocessed_output.numpy()[:, :len(NUM_VARS)])
     processed_categorical_output = process_categorical_model_output(dp, raw_output=unprocessed_output, categorical_feature_names=CAT_VARS)
     
-    # Combine into one array and convert to DataFrame for export
-    numeric_final = pl.DataFrame(processed_numeric_output, schema = [(var,pl.Int32) for var in NUM_VARS])
+    # Change each array to its own dataset, then concat horizontally. Numeric values should be capped according to ranges placed on original dataset.
+    numeric_final = pl.DataFrame(processed_numeric_output, schema = [(var,pl.Int32) for var in NUM_VARS]).with_columns(
+        pl.when(pl.col("patient_systolic_bp") < 90).then(pl.lit(90))\
+        .when(pl.col("patient_systolic_bp") > 200).then(pl.lit(200))\
+        .otherwise(pl.col("patient_systolic_bp")).alias("patient_systolic_bp"),
+        pl.when(pl.col("patient_diastolic_bp") < 50).then(pl.lit(50))\
+        .when(pl.col("patient_diastolic_bp") > 120).then(pl.lit(120))\
+        .otherwise(pl.col("patient_diastolic_bp")).alias("patient_diastolic_bp"),
+        pl.when(pl.col("patient_heart_rate") < 40).then(pl.lit(40))\
+        .when(pl.col("patient_heart_rate") > 140).then(pl.lit(140))\
+        .otherwise(pl.col("patient_heart_rate")).alias("patient_heart_rate")
+    )
+
     categorical_final = pl.DataFrame(processed_categorical_output, schema = [(val,pl.Utf8) for val in CAT_VARS])
     processed_df = pl.concat([numeric_final, categorical_final], how = 'horizontal')
     processed_df.write_parquet('./data/synthetic_data.parquet')
