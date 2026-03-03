@@ -43,12 +43,37 @@ The encoder component of the VAE consists of a mixture of dense, batch normaliza
 The encoder component of the VAE consists of dense layers with varying activations applied.  
 1. Dense - 128 units, ReLU activation  
 2. Dense - 256 units, ReLU activation  
-3a. Dense - 6 units (# numeric variables)  
-3b. Dense for *each* categorical variable (4 units for *patient_gender*, 7 units for *patient_race*)  
+3. Output layer  
+    a. Dense - 6 units (# numeric variables)  
+    b. Dense for *each* categorical variable (4 units for *patient_gender*, 7 units for *patient_race*)  
 4. Horizontal concatenation of 3a and 3b  
 
 
 **Combined model**  
+The functional model itself takes the following as arguments... 
+
+1. Initialized encoder  
+2. Initialized decoder  
+3. Number of continuous variables - ensures numeric and categorical loss functions are correctly applied.  
+4. Categorical reconstruction weight - ensures misclassifications have a non-negligible effect.  
+5. Numeric reconstruction weight - 1 by default, in order to preserve consistency with categorical counterpart.  
+6. Max beta - used in conjunction with a warm starting KL annealing class during training; helps fine-tune synthetic output to appropriately match input data.  
+7. Free bits - ensures latent dimension captures minimum amount of information.  
+
+Training consisted of 20 epochs, with batch sample sizes of 256. The KL annealing callback is set to ramp up the initial beta (default of 0) to *max_beta* over the first 40% of epochs.  
 
 
 ## Data Comparison Analysis  
+
+The initial (training) dataset consisted of 100,000 data points, whereas the output (synthetic) dataset consisted of only 10,000 data points.  
+
+The following plot visualizes original data next to synthetic data for the six numeric variables.  
+![](documentation/numeric_col_distribution.png "Numeric data comparison")  
+
+The following plot demonstrates breakouts for the two categorical/discrete variables.  
+![](documentation/categorical_col_distributions.png "Discrete data comparison")  
+
+Rather than comparing distributions for individual variables, we can also observe similarities across joint distributions, and more specifically, across all data variables. The plot below demonstrates two methods for this comparison, utilizing both principal component analysis and t-distributed stochastic neighbor embeddings for decomposing the original and synthetic datasets to a 2-dimensional space.  
+![](documentation/data_comparison_plot.png "Macro-level data comparison")  
+
+**Consensus.** Generally, the three plots above help determine that the VAE architecture exhibits strong replication abilities given the original training data. There is a slight struggle with the generation of uniform variables (i.e. *patient_age*). However, this can likely be corrected by engineering said variable(s) to either one-hot encodings (similar to our other categorical variables), or N-dimensional embeddings (not explored during this project).  

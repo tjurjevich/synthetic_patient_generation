@@ -20,6 +20,8 @@ DECODER_INNER_DIM = 128
 LATENT_DIM = 8
 FREE_BITS = 0.5
 MAX_BETA = 2.0
+CAT_RECON_WEIGHT = 8.0
+NUM_RECON_WEIGHT = 1.0
 
 # Training epochs & max-beta warmup period
 EPOCHS = 20
@@ -88,11 +90,14 @@ class PatientDataGenerator(tf.keras.Model):
     Framework for the VAE. Initialized with the encoder architecture, decoder architecture, and number of numeric dimensions (in 
     order to split based on variable type, as well as to define specified number of dense layers based on variable type).
     """
-    def __init__(self, encoder, decoder, num_numeric_dimensions, initial_beta = 0.0):
+    def __init__(self, encoder, decoder, num_numeric_dimensions, cat_recon_weight, num_recon_weight, free_bits, initial_beta = 0.0):
         super().__init__()
         self.encoder = encoder 
         self.decoder = decoder 
         self.num_continuous_variables = num_numeric_dimensions
+        self.cat_recon_weight = cat_recon_weight
+        self.num_recon_weight = num_recon_weight
+        self.free_bits = free_bits
         self.beta = tf.Variable(initial_beta, trainable=False, dtype=tf.float32) 
         
         self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
@@ -132,11 +137,11 @@ class PatientDataGenerator(tf.keras.Model):
 
             # 4. KL divergence loss (ensures the encoder posterior sticks true to a standard normal prior, which will be used for generating synthetic data)
             kl_loss = -0.5 * (1 + log_var - tf.square(mean) - tf.exp(log_var))
-            kl_loss = tf.maximum(kl_loss, FREE_BITS)  # caps KL loss to a minimum of FREE_BITS parameter
+            kl_loss = tf.maximum(kl_loss, self.free_bits)  # caps KL loss to a minimum of FREE_BITS parameter
             kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
 
             # 5. Add reconstruction losses with KL divergence loss for overall loss
-            total_loss = (recon_cat * 8.0) + (recon_num * 1.0) + (self.beta * kl_loss)
+            total_loss = (recon_cat * self.cat_recon_weight) + (recon_num * self.num_recon_weight) + (self.beta * kl_loss)
             
             # 6. Calculate gradients and apply to current set of model weights
             grads = tape.gradient(total_loss, self.trainable_weights)
@@ -233,9 +238,14 @@ if __name__ == "__main__":
     decoder = PatientDecoder(inner_dim=DECODER_INNER_DIM, num_numeric_dimensions=len(NUM_VARS), categorical_cardinalities=[len(i) for i in categorical_metadata.values()])
     
     # Pass encoder & decoder into PatientDataGenerator object
-    vae = PatientDataGenerator(encoder = encoder, decoder = decoder, num_numeric_dimensions = len(NUM_VARS))
-
-    
+    vae = PatientDataGenerator(
+        encoder = encoder, 
+        decoder = decoder, 
+        num_numeric_dimensions = len(NUM_VARS),
+        cat_recon_weight = CAT_RECON_WEIGHT,
+        num_recon_weight = NUM_RECON_WEIGHT,
+        free_bits = FREE_BITS
+    )
 
     # Compile and train
     vae.compile(optimizer = "adam")
