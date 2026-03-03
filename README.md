@@ -68,6 +68,7 @@ Training consisted of 20 epochs, with batch sample sizes of 256. The KL annealin
 The initial (training) dataset consisted of 100,000 data points, whereas the output (synthetic) dataset consisted of only 10,000 data points.  
 
 The following plot visualizes original data next to synthetic data for the six numeric variables.  
+
 ![](documentation/numeric_col_distributions.png "Numeric data comparison")  
 
 
@@ -76,6 +77,7 @@ The following plot demonstrates breakouts for the two categorical/discrete varia
 
 
 Rather than comparing distributions for individual variables, we can also observe similarities across joint distributions, and more specifically, across all data variables. The plot below demonstrates two methods for this comparison, utilizing both principal component analysis and t-distributed stochastic neighbor embeddings for decomposing the original and synthetic datasets to a 2-dimensional space.  
+
 ![](documentation/data_comparison_plot.png "Macro-level data comparison")  
 
 
